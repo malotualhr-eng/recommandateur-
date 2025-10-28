@@ -1,0 +1,535 @@
+openapi: 3.1.0
+info:
+  title: Recommandateur API
+  version: "1.0.0"
+  description: >
+    API d’actions pour GPT Creator, connectée au Worker Cloudflare du Recommandateur.
+    Auth flexible côté Worker (Bearer / query / header), mais côté GPT on utilise la clé en query (?api_token=...).
+
+servers:
+  - url: https://recommandateur.malotualhr.workers.dev
+
+security:
+  - ApiTokenQuery: []
+
+tags:
+  - name: Meta
+  - name: Settings
+  - name: Lists
+  - name: Backup
+  - name: Podium
+
+components:
+  securitySchemes:
+    ApiTokenQuery:
+      type: apiKey
+      in: query
+      name: api_token
+      description: Jeton API comme paramètre d’URL (?api_token=...).
+
+  schemas:
+    Meta:
+      type: object
+      properties:
+        app_name: { type: string }
+        app_version: { type: string }
+        last_updated: { type: string, description: ISO datetime }
+        ui_schema_id: { type: string }
+        welcome_template: { type: string }
+        menu:
+          type: array
+          items:
+            type: object
+            properties:
+              num: { type: integer }
+              emoji: { type: string }
+              label: { type: string }
+            required: [label]
+      required: [app_name, app_version, last_updated, menu]
+
+    MetaPatch:
+      type: object
+      description: Patch "souple" pour /meta (tous champs optionnels).
+      properties:
+        app_name: { type: string }
+        app_version: { type: string }
+        ui_schema_id: { type: string }
+        welcome_template: { type: string }
+        menu:
+          type: array
+          items:
+            type: object
+            properties:
+              num: { type: integer }
+              emoji: { type: string }
+              label: { type: string }
+
+    MenuUpdate:
+      type: object
+      properties:
+        menu:
+          type: array
+          items:
+            type: object
+            properties:
+              num: { type: integer }
+              emoji: { type: string }
+              label: { type: string }
+            required: [label]
+        welcome_template: { type: string }
+      required: [menu]
+
+    Settings:
+      type: object
+      description: Réglages persistants côté KV. Tous champs optionnels (patch possible).
+      properties:
+        config_version: { type: integer }
+        updated_at: { type: string }
+        thresholds:
+          type: object
+          properties:
+            default: { type: number }
+            horror: { type: number }
+        weights:
+          type: object
+          properties:
+            user_pref: { type: number }
+            allocine: { type: number }
+            castcrew: { type: number }
+        list_interpretation:
+          type: object
+          properties:
+            parked_bonus: { type: number }
+            reject_malus: { type: number }
+            recency_weight: { type: number }
+        exclusions:
+          type: object
+          properties:
+            rated: { type: boolean }
+            parked: { type: boolean }
+            rejects: { type: boolean }
+        dedup:
+          type: object
+          properties:
+            alias_vo_vf_vq: { type: boolean }
+            remakes: { type: boolean }
+            sagas: { type: boolean }
+        templates:
+          type: object
+          properties:
+            l1_card: { type: string }
+            l3_item: { type: string }
+            genres:
+              type: object
+              properties:
+                case: { type: string }
+                joiner: { type: string }
+        genre_aliases:
+          type: object
+          additionalProperties:
+            type: array
+            items: { type: string }
+        salves:
+          type: object
+          properties:
+            formats_allowed:
+              type: array
+              items: { type: string }
+            autocomplete_missing: { type: boolean }
+        behaviors:
+          type: object
+          additionalProperties:
+            type: object
+            properties:
+              cache_pool_enabled: { type: boolean }
+              cache_pool_keys:
+                type: array
+                items: { type: string }
+              cache_pool_strategy: { type: string }
+              cache_pool_resync_if_empty: { type: boolean }
+              cache_keys:
+                type: array
+                items: { type: string }
+              cache_sync_each_action: { type: boolean }
+              cache_flush_on_write: { type: boolean }
+        ux_prompts:
+          type: object
+          additionalProperties: { type: string }
+        algo_summary:
+          type: object
+          properties:
+            version: { type: string }
+            current: { type: string }
+            changelog:
+              type: array
+              items:
+                type: object
+                properties:
+                  version: { type: string }
+                  at: { type: string }
+                  note: { type: string }
+                  text: { type: string }
+
+    RatingItem:
+      type: object
+      properties:
+        canonical_key: { type: string }
+        title_original: { type: string }
+        year: { type: integer }
+        type: { type: string, enum: [film, serie] }
+        genres:
+          type: array
+          items: { type: string }
+        rating:
+          type: number
+          description: note sur 5 (utiliser le point décimal, ex. 3.5)
+        rated_at: { type: string }
+      required: [canonical_key, title_original, type, rating]
+
+    ParkedItem:
+      type: object
+      properties:
+        canonical_key: { type: string }
+        title_original: { type: string }
+        year: { type: integer }
+        type: { type: string, enum: [film, serie] }
+        genres:
+          type: array
+          items: { type: string }
+        added_at: { type: string }
+      required: [canonical_key, title_original, type]
+
+    RejectItem:
+      type: object
+      properties:
+        canonical_key: { type: string }
+        title_original: { type: string }
+        year: { type: integer }
+        type: { type: string, enum: [film, serie] }
+        genres:
+          type: array
+          items: { type: string }
+        added_at: { type: string }
+      required: [canonical_key, title_original, type]
+
+    ParkedPodium:
+      type: object
+      properties:
+        keys:
+          type: array
+          items: { type: string }
+      required: [keys]
+
+    ListResponse:
+      type: object
+      properties:
+        items:
+          type: array
+          items: { type: object }
+
+    WriteResult:
+      type: object
+      properties:
+        ok: { type: boolean }
+        added: { type: boolean }
+        updated: { type: boolean }
+        count: { type: integer }
+        reason: { type: string }
+
+    BackupExport:
+      type: object
+      properties:
+        exported_at: { type: string }
+        meta: { $ref: '#/components/schemas/Meta' }
+        settings: { $ref: '#/components/schemas/Settings' }
+        ratings:
+          type: array
+          items: { $ref: '#/components/schemas/RatingItem' }
+        parked:
+          type: array
+          items: { $ref: '#/components/schemas/ParkedItem' }
+        rejects:
+          type: array
+          items: { $ref: '#/components/schemas/RejectItem' }
+        parked_podium:
+          type: array
+          items: { type: string }
+
+    BackupImport:
+      type: object
+      properties:
+        meta: { $ref: '#/components/schemas/Meta' }
+        settings: { $ref: '#/components/schemas/Settings' }
+        ratings:
+          type: array
+          items: { $ref: '#/components/schemas/RatingItem' }
+        parked:
+          type: array
+          items: { $ref: '#/components/schemas/ParkedItem' }
+        rejects:
+          type: array
+          items: { $ref: '#/components/schemas/RejectItem' }
+        parked_podium:
+          type: array
+          items: { type: string }
+
+paths:
+  /meta:
+    get:
+      security: []
+      tags: [Meta]
+      operationId: getMeta
+      summary: Lire le meta (menu, accueil)
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Meta' }
+    put:
+      tags: [Meta]
+      operationId: putMeta
+      summary: Mettre à jour le meta (merge profond — patch-like)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/MetaPatch' }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  meta: { $ref: '#/components/schemas/Meta' }
+
+  /meta/menu:
+    get:
+      tags: [Meta]
+      operationId: getMenu
+      summary: Lire uniquement le menu + welcome_template
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  menu:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        num: { type: integer }
+                        emoji: { type: string }
+                        label: { type: string }
+                  welcome_template: { type: string }
+    put:
+      tags: [Meta]
+      operationId: putMenu
+      summary: Mettre à jour uniquement le menu (et éventuellement welcome_template)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/MenuUpdate' }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  meta: { $ref: '#/components/schemas/Meta' }
+
+  /settings:
+    get:
+      security: []
+      tags: [Settings]
+      operationId: getSettings
+      summary: Lire les réglages persistants
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Settings' }
+    put:
+      tags: [Settings]
+      operationId: putSettings
+      summary: Modifier les réglages persistants (patch complet)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Settings' }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  settings: { $ref: '#/components/schemas/Settings' }
+
+  /lists/ratings:
+    get:
+      tags: [Lists]
+      operationId: getRatings
+      summary: Lire la liste des notes persistées
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ListResponse' }
+    post:
+      tags: [Lists]
+      operationId: addRating
+      summary: Ajouter une note
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RatingItem' }
+      responses:
+        "201":
+          description: Créé
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WriteResult' }
+
+  /lists/parked:
+    get:
+      tags: [Lists]
+      operationId: getParked
+      summary: Lire la liste des titres mis de côté
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ListResponse' }
+    post:
+      tags: [Lists]
+      operationId: addParked
+      summary: Ajouter un titre mis de côté
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ParkedItem' }
+      responses:
+        "201":
+          description: Créé
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WriteResult' }
+
+  /lists/rejects:
+    get:
+      tags: [Lists]
+      operationId: getRejects
+      summary: Lire la liste des titres rejetés
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ListResponse' }
+    post:
+      tags: [Lists]
+      operationId: addReject
+      summary: Ajouter un titre rejeté
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RejectItem' }
+      responses:
+        "201":
+          description: Créé
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WriteResult' }
+
+  /lists/parked_podium:
+    get:
+      tags: [Lists]
+      operationId: getParkedPodium
+      summary: Lire le podium des mis de côté
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  keys:
+                    type: array
+                    items: { type: string }
+    put:
+      tags: [Lists]
+      operationId: putParkedPodium
+      summary: Mettre à jour le podium des mis de côté
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                keys:
+                  type: array
+                  items: { type: string }
+              required: [keys]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  keys:
+                    type: array
+                    items: { type: string }
+
+  /backup/export:
+    get:
+      tags: [Backup]
+      operationId: backupExport
+      summary: Exporter toutes les données persistées (meta, settings, ratings, parked, rejects, podium)
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BackupExport' }
+
+  /backup/import:
+    post:
+      tags: [Backup]
+      operationId: backupImport
+      summary: Importer des données persistées
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/BackupImport' }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WriteResult' }
