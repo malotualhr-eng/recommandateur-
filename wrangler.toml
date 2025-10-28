@@ -1,3 +1,4 @@
 name = "recommandateur"
 main = "./worker_app.js"
+type = "javascript"
 compatibility_date = "2025-10-28"
