@@ -680,6 +680,30 @@ async function cachePool(env, req) {
   return jsonResp(payload, 200, req);
 }
 
+async function cachePool(env, req) {
+  if (!isAuthorized(req, env)) return jsonResp({ error: "Unauthorized" }, 401, req);
+  const url = new URL(req.url);
+  const requestedKeys = url.searchParams.getAll("key").map(k => k.toLowerCase());
+  const allowed = {
+    ratings: KEYS.RATINGS,
+    parked: KEYS.PARKED,
+    rejects: KEYS.REJECTS
+  };
+
+  const keysToLoad = (requestedKeys.length ? requestedKeys : Object.keys(allowed))
+    .filter(k => Object.prototype.hasOwnProperty.call(allowed, k));
+
+  const loaders = keysToLoad.map(k => readJSON(env?.DB, allowed[k]).then(v => Array.isArray(v) ? v : []));
+  const results = await Promise.all(loaders);
+
+  const payload = { synced_at: new Date().toISOString() };
+  keysToLoad.forEach((k, idx) => {
+    payload[k] = results[idx];
+  });
+
+  return jsonResp(payload, 200, req);
+}
+
 
 // --- Handlers for meta, settings, lists, podium, backup, diag, health ---
 
