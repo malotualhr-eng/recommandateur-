@@ -4,7 +4,9 @@
 // lists.  The cache pool endpoint allows the GPT agent to fetch multiple lists
 // in a single request, reducing latency.  It also adds configuration fields
 // (cache_keys, cache_sync_each_action, cache_flush_on_write) to the global
-// behaviors section, and includes `rejects` in the cache_pool_keys array.
+// behaviors section, and includes `rejects` in the cache_pool_keys array.  The
+// /l1 handler is aligned with the on-agent logic (type + genre selection,
+// Allociné thresholds, cached exclusions) described in the README.
 // For details on Cloudflare KV behaviour and the 1000-key limit, see the
 // Cloudflare docs【497129539834723†L93-L110】【847087639538105†L142-L163】.
 
@@ -283,10 +285,12 @@ async function fetchTitlePool(type, genre, env) {
   const listRatings = await readJSON(env?.DB, KEYS.RATINGS) || [];
   const listParked = await readJSON(env?.DB, KEYS.PARKED) || [];
   const list = [...listRatings, ...listParked];
+  const lowerGenre = (genre || "").toLowerCase();
+  const allGenres = !genre || lowerGenre.includes("tous");
   return list.filter(item =>
     item.type === type &&
-    (!genre || item.genres?.some(g =>
-      g.toLowerCase().includes(genre.toLowerCase())
+    (allGenres || item.genres?.some(g =>
+      g.toLowerCase().includes(lowerGenre)
     ))
   );
 }
@@ -323,8 +327,9 @@ async function fetchCandidatesFromSearch(type, genre, settings, env) {
     // Minimum note spectateurs (scale 0–5).  Horreur genres use the horror
     // threshold; otherwise use default threshold.  We keep the 5‑point scale
     // because Allociné returns userRating averages on a 5‑point scale.
-    const lowerGenre = genre.toLowerCase();
-    const minSpectators = lowerGenre.includes("horreur")
+    const lowerGenre = (genre || "").toLowerCase();
+    const isHorror = /(horreur|epouvante|frisson|gore|peur)/.test(lowerGenre);
+    const minSpectators = isHorror
       ? (settings.thresholds?.horror ?? 2.5)
       : (settings.thresholds?.default ?? 3.0);
 
@@ -367,7 +372,7 @@ async function fetchCandidatesFromSearch(type, genre, settings, env) {
           if (!Number.isNaN(sr)) spectateurs = sr.toFixed(1);
         }
         // Only keep candidates meeting the minimum spectator rating
-        if (spectateurs === null || parseFloat(spectateurs) < minSpectators) {
+        if (spectateurs === null || parseFloat(spectateurs) <= minSpectators) {
           return null;
         }
         const accroche = item.synopsisShort || item.synopsis || "";
@@ -396,6 +401,7 @@ async function fetchCandidatesFromSearch(type, genre, settings, env) {
 }
 
 async function l1Reco(env, req) {
+  if (!isAuthorized(req, env)) return jsonResp({ error: "Unauthorized" }, 401, req);
   const url = new URL(req.url);
   const type = url.searchParams.get("type");
   const genre = url.searchParams.get("genre");
@@ -405,12 +411,14 @@ async function l1Reco(env, req) {
   }
 
   // Charger settings et listes
-  const [settings, ratings, parked, rejects] = await Promise.all([
+  const [settingsRaw, ratings, parked, rejects] = await Promise.all([
     readJSON(env.DB, KEYS.SETTINGS),
     readJSON(env.DB, KEYS.RATINGS) ?? [],
     readJSON(env.DB, KEYS.PARKED) ?? [],
     readJSON(env.DB, KEYS.REJECTS) ?? []
   ]);
+
+  const settings = settingsRaw ?? defaultSettings();
 
   // Build a set of normalized canonical keys from all exclusion lists (ratings, parked, rejects)
   const exclusions = new Set([...ratings, ...parked, ...rejects].map(x => normalizeCanonical(x.canonical_key)));
@@ -430,18 +438,20 @@ async function l1Reco(env, req) {
   }
 
   // Sélection stricte L1
-  const lowerGenre = genre.toLowerCase();
-  const minRating = lowerGenre.includes("horreur")
-    ? settings.thresholds.horror
-    : settings.thresholds.default;
+  const lowerGenre = (genre || "").toLowerCase();
+  const isAllGenres = !genre || lowerGenre.includes("tous");
+  const isHorror = /(horreur|epouvante|frisson|gore|peur)/.test(lowerGenre);
+  const minRating = isHorror
+    ? (settings.thresholds?.horror ?? 2.5)
+    : (settings.thresholds?.default ?? 3.0);
   const candidates = pool
     .filter(t => t.type === type)
-    .filter(t => genre === "tous" || (t.genres || []).some(g => String(g).toLowerCase().includes(lowerGenre)))
+    .filter(t => isAllGenres || (t.genres || []).some(g => String(g).toLowerCase().includes(lowerGenre)))
     // Exclude any candidate whose normalized canonical_key appears in the exclusions set
     .filter(t => !exclusions.has(normalizeCanonical(t.canonical_key)))
     .filter(t => {
       const s = parseFloat(t.spectateurs || "0");
-      return s >= minRating;
+      return s > minRating;
     });
 
   if (!candidates.length) {
@@ -495,6 +505,30 @@ async function l1Reco(env, req) {
     formatted_card: card,
     raw: top
   }, 200, req);
+}
+
+async function cachePool(env, req) {
+  if (!isAuthorized(req, env)) return jsonResp({ error: "Unauthorized" }, 401, req);
+  const url = new URL(req.url);
+  const requestedKeys = url.searchParams.getAll("key").map(k => k.toLowerCase());
+  const allowed = {
+    ratings: KEYS.RATINGS,
+    parked: KEYS.PARKED,
+    rejects: KEYS.REJECTS
+  };
+
+  const keysToLoad = (requestedKeys.length ? requestedKeys : Object.keys(allowed))
+    .filter(k => Object.prototype.hasOwnProperty.call(allowed, k));
+
+  const loaders = keysToLoad.map(k => readJSON(env?.DB, allowed[k]).then(v => Array.isArray(v) ? v : []));
+  const results = await Promise.all(loaders);
+
+  const payload = { synced_at: new Date().toISOString() };
+  keysToLoad.forEach((k, idx) => {
+    payload[k] = results[idx];
+  });
+
+  return jsonResp(payload, 200, req);
 }
 
 
@@ -562,6 +596,7 @@ async function putSettings(env, req) {
 
 // List endpoints
 async function getList(env, key, req) {
+  if (!isAuthorized(req, env)) return jsonResp({ error: "Unauthorized" }, 401, req);
   const url = new URL(req.url);
   const offset = Math.max(0, parseInt(url.searchParams.get("offset") || "0", 10) || 0);
   const limit = Math.min(Math.max(1, parseInt(url.searchParams.get("limit") || `${DEFAULT_LIMIT}`, 10) || DEFAULT_LIMIT), 5000);
@@ -691,6 +726,7 @@ async function backupImport(env, req) {
 
 // Diagnostic handler
 async function diag(env, req) {
+  if (!isAuthorized(req, env)) return jsonResp({ error: "Unauthorized" }, 401, req);
   const [
     ratingsRaw,
     parkedRaw,
@@ -802,6 +838,12 @@ export default {
       if (path === "/backup/import") {
         if (method === "POST") return backupImport(env, req);
         return methodNotAllowed(req, ["POST"]);
+      }
+
+      // --- CACHE POOL ---
+      if (path === "/cache/pool") {
+        if (method === "GET") return cachePool(env, req);
+        return methodNotAllowed(req, ["GET"]);
       }
 
       // --- DIAG/HEALTH ---

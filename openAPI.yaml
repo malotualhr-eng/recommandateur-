@@ -18,6 +18,9 @@ tags:
   - name: Lists
   - name: Backup
   - name: Podium
+  - name: Recommendations
+  - name: Cache
+  - name: Diagnostics
 
 components:
   securitySchemes:
@@ -223,9 +226,55 @@ components:
     ListResponse:
       type: object
       properties:
+        total: { type: integer }
+        offset: { type: integer }
+        limit: { type: integer }
         items:
           type: array
           items: { type: object }
+
+    CachePoolResponse:
+      type: object
+      properties:
+        synced_at: { type: string }
+        ratings:
+          type: array
+          items: { $ref: '#/components/schemas/RatingItem' }
+        parked:
+          type: array
+          items: { $ref: '#/components/schemas/ParkedItem' }
+        rejects:
+          type: array
+          items: { $ref: '#/components/schemas/RejectItem' }
+
+    L1Recommendation:
+      type: object
+      properties:
+        titre: { type: string }
+        formatted_card: { type: string }
+        raw:
+          type: object
+          additionalProperties: true
+
+    DiagResponse:
+      type: object
+      properties:
+        ok: { type: boolean }
+        kvBound: { type: boolean }
+        hasApiToken: { type: boolean }
+        authorized: { type: boolean }
+        counts:
+          type: object
+          properties:
+            ratings: { type: integer }
+            parked: { type: integer }
+            rejects: { type: integer }
+            parked_podium: { type: integer }
+        versions:
+          type: object
+          properties:
+            app_version: { type: string }
+            config_version: { type: integer }
 
     WriteResult:
       type: object
@@ -308,6 +357,7 @@ paths:
 
   /meta/menu:
     get:
+      security: []
       tags: [Meta]
       operationId: getMenu
       summary: Lire uniquement le menu + welcome_template
@@ -533,3 +583,85 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/WriteResult' }
+
+  /cache/pool:
+    get:
+      tags: [Cache]
+      operationId: getCachePool
+      summary: Récupérer un lot de listes pour alimenter le cache local
+      description: >
+        Retourne les listes `ratings`, `parked` et `rejects` en une seule requête.
+        Le paramètre `key` peut être répété pour limiter la réponse à un sous-ensemble.
+      parameters:
+        - name: key
+          in: query
+          description: Liste cible (ratings, parked, rejects). Peut être répété.
+          required: false
+          schema:
+            type: string
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CachePoolResponse' }
+
+  /l1:
+    get:
+      tags: [Recommendations]
+      operationId: getL1Recommendation
+      summary: Générer une recommandation L1 déterministe
+      description: >
+        Produit une carte de recommandation unique en appliquant la logique L1 :
+        filtrage du type/genre demandé sur Allociné, comparaison avec les listes
+        en cache et scoring prédictif pour retenir le meilleur titre.
+      parameters:
+        - name: type
+          in: query
+          required: true
+          schema:
+            type: string
+            enum: [film, serie]
+        - name: genre
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/L1Recommendation' }
+        "400":
+          description: Paramètres manquants ou invalides
+        "404":
+          description: Aucun titre valide trouvé
+
+  /diag:
+    get:
+      tags: [Diagnostics]
+      operationId: getDiagnostics
+      summary: Vérifier l’état global du Worker
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DiagResponse' }
+
+  /health:
+    get:
+      tags: [Diagnostics]
+      operationId: getHealth
+      summary: Vérifier la disponibilité du Worker
+      security: []
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
