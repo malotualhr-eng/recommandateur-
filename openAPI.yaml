@@ -18,6 +18,9 @@ tags:
   - name: Lists
   - name: Backup
   - name: Podium
+  - name: Recommendations
+  - name: Cache
+  - name: Diagnostics
 
 components:
   securitySchemes:
@@ -92,10 +95,17 @@ components:
             horror: { type: number }
         weights:
           type: object
+          description: Pondérations du scoring L1 (la somme est normalisée par le Worker).
           properties:
-            user_pref: { type: number }
-            allocine: { type: number }
-            castcrew: { type: number }
+            user_pref:
+              type: number
+              description: Poids accordé aux préférences utilisateur (cible 0,20).
+            allocine:
+              type: number
+              description: Poids accordé aux notes Allociné (cible 0,60).
+            castcrew:
+              type: number
+              description: Poids accordé aux affinités cast & crew (cible 0,20).
         list_interpretation:
           type: object
           properties:
@@ -135,7 +145,15 @@ components:
             formats_allowed:
               type: array
               items: { type: string }
-            autocomplete_missing: { type: boolean }
+            format_profiles:
+              type: object
+              additionalProperties:
+                type: object
+                properties:
+                  films: { type: integer }
+                  series: { type: integer }
+                  enforce: { type: boolean }
+            auto_complete_missing: { type: boolean }
         behaviors:
           type: object
           additionalProperties:
@@ -152,9 +170,22 @@ components:
                 items: { type: string }
               cache_sync_each_action: { type: boolean }
               cache_flush_on_write: { type: boolean }
+              castcrew_preferences:
+                type: object
+                properties:
+                  favorites:
+                    type: array
+                    items: { type: string }
+                  blacklist:
+                    type: array
+                    items: { type: string }
         ux_prompts:
           type: object
-          additionalProperties: { type: string }
+          additionalProperties:
+            oneOf:
+              - type: string
+              - type: array
+                items: { type: string }
         algo_summary:
           type: object
           properties:
@@ -223,9 +254,81 @@ components:
     ListResponse:
       type: object
       properties:
+        total: { type: integer }
+        offset: { type: integer }
+        limit: { type: integer }
         items:
           type: array
           items: { type: object }
+
+    CachePoolResponse:
+      type: object
+      properties:
+        synced_at: { type: string }
+        ratings:
+          type: array
+          items: { $ref: '#/components/schemas/RatingItem' }
+        parked:
+          type: array
+          items: { $ref: '#/components/schemas/ParkedItem' }
+        rejects:
+          type: array
+          items: { $ref: '#/components/schemas/RejectItem' }
+
+    L1Recommendation:
+      type: object
+      properties:
+        titre: { type: string }
+        intro:
+          type: string
+          description: Accroche à afficher avant la carte L1 (issue de ux_prompts.l1_intro_pool).
+        formatted_card: { type: string }
+        poster_url:
+          type: string
+          format: uri
+        notes:
+          type: object
+          properties:
+            spectateurs: { type: string }
+            presse: { type: string }
+        raw:
+          type: object
+          additionalProperties: true
+        score_breakdown:
+          type: object
+          properties:
+            weights:
+              type: object
+              properties:
+                allocine: { type: number }
+                user_pref: { type: number }
+                castcrew: { type: number }
+            components:
+              type: object
+              properties:
+                allocine: { type: number }
+                user_pref: { type: number }
+                castcrew: { type: number }
+
+    DiagResponse:
+      type: object
+      properties:
+        ok: { type: boolean }
+        kvBound: { type: boolean }
+        hasApiToken: { type: boolean }
+        authorized: { type: boolean }
+        counts:
+          type: object
+          properties:
+            ratings: { type: integer }
+            parked: { type: integer }
+            rejects: { type: integer }
+            parked_podium: { type: integer }
+        versions:
+          type: object
+          properties:
+            app_version: { type: string }
+            config_version: { type: integer }
 
     WriteResult:
       type: object
@@ -308,6 +411,7 @@ paths:
 
   /meta/menu:
     get:
+      security: []
       tags: [Meta]
       operationId: getMenu
       summary: Lire uniquement le menu + welcome_template
@@ -533,3 +637,95 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/WriteResult' }
+
+  /cache/pool:
+    get:
+      tags: [Cache]
+      operationId: getCachePool
+      summary: Récupérer un lot de listes pour alimenter le cache local
+      description: >
+        Retourne les listes `ratings`, `parked` et `rejects` en une seule requête.
+        Le paramètre `key` peut être répété pour limiter la réponse à un sous-ensemble.
+        Utiliser `keys` ou `keys[]` revient à passer une chaîne contenant plusieurs
+        clés séparées par des virgules ou des espaces. Les tableaux JSON (ex: `["ratings"]`)
+        ne sont pas pris en charge et renvoient une erreur 400.
+      parameters:
+        - name: key
+          in: query
+          description: Liste cible (ratings, parked, rejects). Peut être répété.
+          required: false
+          schema:
+            type: string
+        - name: keys
+          in: query
+          description: Variante permettant de passer plusieurs clés sous forme de chaîne.
+            Séparer les clés par des virgules ou des espaces. Les tableaux JSON ne sont pas acceptés.
+          required: false
+          schema:
+            type: string
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CachePoolResponse' }
+
+  /l1:
+    get:
+      tags: [Recommendations]
+      operationId: getL1Recommendation
+      summary: Générer une recommandation L1 déterministe
+      description: >
+        Produit une carte de recommandation unique en appliquant la logique L1 :
+        filtrage du type/genre demandé sur Allociné, comparaison avec les listes
+        en cache et scoring prédictif pour retenir le meilleur titre.
+      parameters:
+        - name: type
+          in: query
+          required: true
+          schema:
+            type: string
+            enum: [film, serie]
+        - name: genre
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/L1Recommendation' }
+        "400":
+          description: Paramètres manquants ou invalides
+        "404":
+          description: Aucun titre valide trouvé
+
+  /diag:
+    get:
+      tags: [Diagnostics]
+      operationId: getDiagnostics
+      summary: Vérifier l’état global du Worker
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DiagResponse' }
+
+  /health:
+    get:
+      tags: [Diagnostics]
+      operationId: getHealth
+      summary: Vérifier la disponibilité du Worker
+      security: []
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
