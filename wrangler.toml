@@ -1,9 +1,3 @@
 name = "recommandateur"
+main = "worker_app.js"
 compatibility_date = "2025-10-28"
-main = "./worker_app.js"
-type = "javascript"
-
-[assets]
-directory = "./dist"
-binding = "ASSETS"
-
