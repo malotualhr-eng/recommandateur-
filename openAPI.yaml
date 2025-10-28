@@ -95,10 +95,17 @@ components:
             horror: { type: number }
         weights:
           type: object
+          description: Pondérations du scoring L1 (la somme est normalisée par le Worker).
           properties:
-            user_pref: { type: number }
-            allocine: { type: number }
-            castcrew: { type: number }
+            user_pref:
+              type: number
+              description: Poids accordé aux préférences utilisateur (cible 0,20).
+            allocine:
+              type: number
+              description: Poids accordé aux notes Allociné (cible 0,60).
+            castcrew:
+              type: number
+              description: Poids accordé aux affinités cast & crew (cible 0,20).
         list_interpretation:
           type: object
           properties:
@@ -138,7 +145,15 @@ components:
             formats_allowed:
               type: array
               items: { type: string }
-            autocomplete_missing: { type: boolean }
+            format_profiles:
+              type: object
+              additionalProperties:
+                type: object
+                properties:
+                  films: { type: integer }
+                  series: { type: integer }
+                  enforce: { type: boolean }
+            auto_complete_missing: { type: boolean }
         behaviors:
           type: object
           additionalProperties:
@@ -155,9 +170,22 @@ components:
                 items: { type: string }
               cache_sync_each_action: { type: boolean }
               cache_flush_on_write: { type: boolean }
+              castcrew_preferences:
+                type: object
+                properties:
+                  favorites:
+                    type: array
+                    items: { type: string }
+                  blacklist:
+                    type: array
+                    items: { type: string }
         ux_prompts:
           type: object
-          additionalProperties: { type: string }
+          additionalProperties:
+            oneOf:
+              - type: string
+              - type: array
+                items: { type: string }
         algo_summary:
           type: object
           properties:
@@ -251,10 +279,36 @@ components:
       type: object
       properties:
         titre: { type: string }
+        intro:
+          type: string
+          description: Accroche à afficher avant la carte L1 (issue de ux_prompts.l1_intro_pool).
         formatted_card: { type: string }
+        poster_url:
+          type: string
+          format: uri
+        notes:
+          type: object
+          properties:
+            spectateurs: { type: string }
+            presse: { type: string }
         raw:
           type: object
           additionalProperties: true
+        score_breakdown:
+          type: object
+          properties:
+            weights:
+              type: object
+              properties:
+                allocine: { type: number }
+                user_pref: { type: number }
+                castcrew: { type: number }
+            components:
+              type: object
+              properties:
+                allocine: { type: number }
+                user_pref: { type: number }
+                castcrew: { type: number }
 
     DiagResponse:
       type: object
