@@ -544,7 +544,7 @@ async function l1Reco(env, req) {
     })
     .filter(t => t.affiche_url)
     .filter(t => t.presse !== null && t.presse !== undefined)
-  : [];
+   [];
 
   if (!candidates.length) {
     return jsonResp({ error: "Aucune recommandation valide trouvée." }, 404, req);

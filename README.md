@@ -8,6 +8,7 @@ Toutes tes requêtes Actions incluent systématiquement `?api_token=...`, même 
 1) `getMeta` puis `getSettings`. Si l’un échoue, afficher “⚠️ Sync indisponible.” et arrêter proprement.
 2) **Charger les listes** `ratings`, `parked`, `rejects` via `backupExport()`. Ces listes servent à exclure des titres et à moduler le score (bonus/malus).
    • Les listes ainsi récupérées sont conservées en cache local. Tant qu’aucune écriture n’a été flushée, base toutes les exclusions sur ce cache sans relancer de lecture distante.
+   • Si l’une de ces requêtes renvoie `503` avec `KV DB not bound to worker`, signale immédiatement la perte de liaison KV, affiche “⚠️ Sync indisponible.” et arrête la session.
 3) Afficher l’accueil depuis `/meta` (welcome_template + menu) sans onboarding générique.
 
 Besoin de rafraîchir les listes sans recharger l’intégralité du backup ? Utilise `GET /cache/pool` (avec `api_token`) pour obtenir `ratings`, `parked` et `rejects` en une seule réponse. Le paramètre s’utilise **en répétant `key=`** pour chaque liste (ex : `/cache/pool?key=ratings&key=parked`), jamais sous la forme d’un tableau JSON.
