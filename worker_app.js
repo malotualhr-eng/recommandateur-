@@ -4,7 +4,9 @@
 // lists.  The cache pool endpoint allows the GPT agent to fetch multiple lists
 // in a single request, reducing latency.  It also adds configuration fields
 // (cache_keys, cache_sync_each_action, cache_flush_on_write) to the global
-// behaviors section, and includes `rejects` in the cache_pool_keys array.
+// behaviors section, and includes `rejects` in the cache_pool_keys array.  The
+// /l1 handler is aligned with the on-agent logic (type + genre selection,
+// Allociné thresholds, cached exclusions) described in the README.
 // For details on Cloudflare KV behaviour and the 1000-key limit, see the
 // Cloudflare docs【497129539834723†L93-L110】【847087639538105†L142-L163】.
 
@@ -194,14 +196,15 @@ function defaultSettings() {
         // Never pick a random title from the local pool; always call the /l1 API
         // to generate a recommendation. The local cache is only used to filter
         // out titles already rated, parked or rejected.
-        intro_random_from_pool: false,
+        intro_random_from_pool: true,
         loop_on_response: true,
         auto_commit_actions: true,
         next_after_action: "immediate",
         show_card_always: true,
         accept_synonyms: ["suivant","next","skip"],
         rating_regex: "^(?:[0-5](?:[\\.,][0-9])?)\\/5$",
-        accroche: { source: "synopsis_web", max_chars: 180, fallback: "Pitch bref indisponible." }
+        accroche: { source: "synopsis_web", max_chars: 180, fallback: "Pitch bref indisponible." },
+        castcrew_preferences: { favorites: [], blacklist: [] }
       },
       "l2": { group_by: "genre", order: "added_at_desc" },
       "l3": {
@@ -283,10 +286,12 @@ async function fetchTitlePool(type, genre, env) {
   const listRatings = await readJSON(env?.DB, KEYS.RATINGS) || [];
   const listParked = await readJSON(env?.DB, KEYS.PARKED) || [];
   const list = [...listRatings, ...listParked];
+  const lowerGenre = (genre || "").toLowerCase();
+  const allGenres = !genre || lowerGenre.includes("tous");
   return list.filter(item =>
     item.type === type &&
-    (!genre || item.genres?.some(g =>
-      g.toLowerCase().includes(genre.toLowerCase())
+    (allGenres || item.genres?.some(g =>
+      g.toLowerCase().includes(lowerGenre)
     ))
   );
 }
@@ -323,8 +328,9 @@ async function fetchCandidatesFromSearch(type, genre, settings, env) {
     // Minimum note spectateurs (scale 0–5).  Horreur genres use the horror
     // threshold; otherwise use default threshold.  We keep the 5‑point scale
     // because Allociné returns userRating averages on a 5‑point scale.
-    const lowerGenre = genre.toLowerCase();
-    const minSpectators = lowerGenre.includes("horreur")
+    const lowerGenre = (genre || "").toLowerCase();
+    const isHorror = /(horreur|epouvante|frisson|gore|peur)/.test(lowerGenre);
+    const minSpectators = isHorror
       ? (settings.thresholds?.horror ?? 2.5)
       : (settings.thresholds?.default ?? 3.0);
 
@@ -367,11 +373,23 @@ async function fetchCandidatesFromSearch(type, genre, settings, env) {
           if (!Number.isNaN(sr)) spectateurs = sr.toFixed(1);
         }
         // Only keep candidates meeting the minimum spectator rating
-        if (spectateurs === null || parseFloat(spectateurs) < minSpectators) {
+        if (spectateurs === null || parseFloat(spectateurs) <= minSpectators) {
           return null;
         }
         const accroche = item.synopsisShort || item.synopsis || "";
         const affiche_url = item.poster && item.poster.href ? item.poster.href : null;
+        if (!affiche_url) return null;
+        const pressFormatted = (presse !== null && !Number.isNaN(presse)) ? presse.toFixed(1) : null;
+        let cast = [];
+        let crew = [];
+        if (item.castingShort && typeof item.castingShort === "object") {
+          if (item.castingShort.actors) {
+            cast = String(item.castingShort.actors).split(/,|\/|\u2022/).map(s => s.trim()).filter(Boolean);
+          }
+          if (item.castingShort.directors) {
+            crew = String(item.castingShort.directors).split(/,|\/|\u2022/).map(s => s.trim()).filter(Boolean);
+          }
+        }
         // Canonical key: slugify title + year
         const slug = String(titre).toLowerCase().normalize("NFD").replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
         const canonical_key = `${slug}-${annee}`;
@@ -380,10 +398,12 @@ async function fetchCandidatesFromSearch(type, genre, settings, env) {
           annee: String(annee || "").trim(),
           type,
           genres,
-          presse,
+          presse: pressFormatted,
           spectateurs,
           accroche,
           affiche_url,
+          cast,
+          crew,
           canonical_key
         };
       })
@@ -395,7 +415,92 @@ async function fetchCandidatesFromSearch(type, genre, settings, env) {
   }
 }
 
+function clamp01(value) {
+  if (!Number.isFinite(value)) return 0;
+  if (value < 0) return 0;
+  if (value > 1) return 1;
+  return value;
+}
+
+function pickIntroText(settings, seed) {
+  const pool = settings?.ux_prompts?.l1_intro_pool;
+  if (Array.isArray(pool) && pool.length) {
+    if (!seed) return String(pool[0]).trim();
+    let hash = 0;
+    for (let i = 0; i < seed.length; i += 1) {
+      hash = (hash * 31 + seed.charCodeAt(i)) | 0;
+    }
+    const index = Math.abs(hash) % pool.length;
+    return String(pool[index]).trim();
+  }
+  if (typeof pool === "string" && pool.trim()) {
+    return pool.trim();
+  }
+  return null;
+}
+
+function computeAllocineComponent(candidate) {
+  const spectateurNorm = clamp01(parseFloat(candidate.spectateurs) / 5);
+  const presseVal = candidate.presse !== null && candidate.presse !== undefined
+    ? parseFloat(candidate.presse)
+    : NaN;
+  const presseNorm = Number.isNaN(presseVal) ? spectateurNorm : clamp01(presseVal / 5);
+  // Spectateur rating weighs heavier than presse, but both come from Allociné.
+  return clamp01((spectateurNorm * 0.7) + (presseNorm * 0.3));
+}
+
+function computeUserPreferenceComponent(ratings, candidate) {
+  if (!Array.isArray(ratings) || ratings.length === 0) return 0.2;
+  const candidateGenres = new Set((candidate.genres || []).map(g => String(g).toLowerCase()));
+  if (!candidateGenres.size) return 0.2;
+  const relevant = ratings.filter(item =>
+    item && item.type === candidate.type && Array.isArray(item.genres) &&
+    item.genres.some(g => candidateGenres.has(String(g).toLowerCase()))
+  );
+  if (!relevant.length) return 0.2;
+  const sumRatings = relevant.reduce((acc, item) => {
+    const val = parseFloat(item.rating);
+    return acc + (Number.isNaN(val) ? 0 : val);
+  }, 0);
+  const avg = sumRatings / relevant.length;
+  const normalized = clamp01((avg - 2) / 3); // map [2;5] -> [0;1]
+  const coverage = clamp01(relevant.reduce((acc, item) => {
+    const itemGenres = (item.genres || []).map(g => String(g).toLowerCase());
+    const matches = itemGenres.filter(g => candidateGenres.has(g)).length;
+    return acc + matches;
+  }, 0) / (Math.max(candidateGenres.size, 1) * relevant.length));
+  return clamp01((normalized * 0.8) + (coverage * 0.2));
+}
+
+function computeCastCrewComponent(candidate, settings) {
+  const prefs = settings?.behaviors?.l1?.castcrew_preferences || {};
+  const favorites = Array.isArray(prefs.favorites)
+    ? prefs.favorites.map(v => normalizeCanonical(v)).filter(Boolean)
+    : [];
+  const blacklist = Array.isArray(prefs.blacklist)
+    ? prefs.blacklist.map(v => normalizeCanonical(v)).filter(Boolean)
+    : [];
+  const participants = [...(candidate.cast || []), ...(candidate.crew || [])]
+    .map(name => normalizeCanonical(name))
+    .filter(Boolean);
+  if (!participants.length) return favorites.length ? 0 : 0.5;
+  let score = 0.5;
+  if (favorites.length) {
+    const favSet = new Set(favorites);
+    const favMatches = participants.filter(p => favSet.has(p)).length;
+    score += Math.min(0.4, favMatches / favorites.length);
+  }
+  if (blacklist.length) {
+    const blackSet = new Set(blacklist);
+    const blackMatches = participants.filter(p => blackSet.has(p)).length;
+    score -= Math.min(0.5, blackMatches / blacklist.length);
+  }
+  return clamp01(score);
+}
+
 async function l1Reco(env, req) {
+  if (!isAuthorized(req, env)) return jsonResp({ error: "Unauthorized" }, 401, req);
+  if (!env?.DB) return jsonResp({ error: "KV DB not bound to worker" }, 503, req);
   const url = new URL(req.url);
   const type = url.searchParams.get("type");
   const genre = url.searchParams.get("genre");
@@ -405,59 +510,66 @@ async function l1Reco(env, req) {
   }
 
   // Charger settings et listes
-  const [settings, ratings, parked, rejects] = await Promise.all([
+  const [settingsRaw, ratings, parked, rejects] = await Promise.all([
     readJSON(env.DB, KEYS.SETTINGS),
     readJSON(env.DB, KEYS.RATINGS) ?? [],
     readJSON(env.DB, KEYS.PARKED) ?? [],
     readJSON(env.DB, KEYS.REJECTS) ?? []
   ]);
 
+  const settings = settingsRaw ?? defaultSettings();
+
   // Build a set of normalized canonical keys from all exclusion lists (ratings, parked, rejects)
   const exclusions = new Set([...ratings, ...parked, ...rejects].map(x => normalizeCanonical(x.canonical_key)));
   const template = settings.templates?.l1_card ?? "⚠️ Pas de template l1_card";
 
-  // Préparer le pool de candidats.  On tente d'abord une recherche externe pour
-  // constituer un ensemble de titres correspondant au type et au genre et
-  // respectant les seuils Allociné (note spectateurs).  Si aucune donnée
-  // n'est trouvée ou si l'API n'est pas configurée, on revient au pool local
-  // (ratings + parked).
-  let pool = await fetchCandidatesFromSearch(type, genre, settings, env);
-  if (!Array.isArray(pool) || pool.length === 0) {
-    // Fallback: utiliser les listes internes (ratings + parked) pour créer
-    // un pool minimal.  fetchTitlePool applique déjà le filtre sur type et
-    // genre.
-    pool = await fetchTitlePool(type, genre, env);
-  }
+  // Préparer le pool de candidats via Allociné exclusivement.
+  const pool = await fetchCandidatesFromSearch(type, genre, settings, env);
 
   // Sélection stricte L1
-  const lowerGenre = genre.toLowerCase();
-  const minRating = lowerGenre.includes("horreur")
-    ? settings.thresholds.horror
-    : settings.thresholds.default;
-  const candidates = pool
+  const lowerGenre = (genre || "").toLowerCase();
+  const isAllGenres = !genre || lowerGenre.includes("tous");
+  const isHorror = /(horreur|epouvante|frisson|gore|peur)/.test(lowerGenre);
+  const minRating = isHorror
+    ? (settings.thresholds?.horror ?? 2.5)
+    : (settings.thresholds?.default ?? 3.0);
+  const candidates = Array.isArray(pool) ? pool
     .filter(t => t.type === type)
-    .filter(t => genre === "tous" || (t.genres || []).some(g => String(g).toLowerCase().includes(lowerGenre)))
+    .filter(t => isAllGenres || (t.genres || []).some(g => String(g).toLowerCase().includes(lowerGenre)))
     // Exclude any candidate whose normalized canonical_key appears in the exclusions set
     .filter(t => !exclusions.has(normalizeCanonical(t.canonical_key)))
     .filter(t => {
       const s = parseFloat(t.spectateurs || "0");
-      return s >= minRating;
-    });
+      return s > minRating;
+    })
+    .filter(t => t.affiche_url)
+    .filter(t => t.presse !== null && t.presse !== undefined)
+  : [];
 
   if (!candidates.length) {
     return jsonResp({ error: "Aucune recommandation valide trouvée." }, 404, req);
   }
 
-  // Scoring simple (pondération Spectateurs + Presse + affinité genre)
+  const weightsRaw = settings.weights || {};
+  const allocineWeight = Number.isFinite(weightsRaw.allocine) ? weightsRaw.allocine : 0.6;
+  const userWeight = Number.isFinite(weightsRaw.user_pref) ? weightsRaw.user_pref : 0.2;
+  const castCrewWeight = Number.isFinite(weightsRaw.castcrew) ? weightsRaw.castcrew : 0.2;
+  const totalWeight = allocineWeight + userWeight + castCrewWeight || 1;
+  const normalizedWeights = {
+    allocine: allocineWeight / totalWeight,
+    user_pref: userWeight / totalWeight,
+    castcrew: castCrewWeight / totalWeight
+  };
+
   const scored = candidates.map(t => {
-    // Convert notes to numbers safely; parseFloat expects a string, so cast values to string first
-    const sVal = parseFloat(String(t.spectateurs ?? "0"));
-    const pVal = parseFloat(String(t.presse ?? "0"));
+    const allocineComponent = computeAllocineComponent(t);
+    const userComponent = computeUserPreferenceComponent(ratings, t);
+    const castcrewComponent = computeCastCrewComponent(t, settings);
     const score =
-      (Number.isNaN(sVal) ? 0 : sVal) * 0.4 +
-      (Number.isNaN(pVal) ? 0 : pVal) * 0.2 +
-      ((t.genres || []).some(g => String(g).toLowerCase().includes(genre.toLowerCase())) ? 0.5 : 0);
-    return { ...t, score };
+      (normalizedWeights.allocine * allocineComponent) +
+      (normalizedWeights.user_pref * userComponent) +
+      (normalizedWeights.castcrew * castcrewComponent);
+    return { ...t, score, components: { allocine: allocineComponent, user_pref: userComponent, castcrew: castcrewComponent } };
   });
 
   scored.sort((a, b) => b.score - a.score);
@@ -480,27 +592,99 @@ async function l1Reco(env, req) {
   const dureeVal = (top && (top)["duree"] !== undefined && (top)["duree"] !== null) ? (top)["duree"] : "N/A";
   const dureeStr = dureeVal;
   const card = template
-    .replace("{titre}", top.titre)
-    .replace("{annee}", top.annee || "N/A")
-    .replace("{type}", top.type)
-    .replace("{duree}", dureeStr)
-    .replace("{genres}", (top.genres || []).join(" • "))
-    .replace("{note_presse}", notePresseStr)
-    .replace("{note_spectateurs}", noteSpectateursStr)
-    .replace("{resume}", top.accroche || "Résumé indisponible.")
-    .replace("{affiche_url}", top.affiche_url || "https://dummyimage.com/600x800/cccccc/000000&text=Affiche");
+    .replace(/{titre}/g, top.titre)
+    .replace(/{annee}/g, top.annee || "N/A")
+    .replace(/{type}/g, top.type)
+    .replace(/{duree}/g, dureeStr)
+    .replace(/{genres}/g, (top.genres || []).join(" • "))
+    .replace(/{note_presse}/g, notePresseStr)
+    .replace(/{note_spectateurs}/g, noteSpectateursStr)
+    .replace(/{presse}/g, notePresseStr)
+    .replace(/{spectateurs}/g, noteSpectateursStr)
+    .replace(/{resume}/g, top.accroche || "Résumé indisponible.")
+    .replace(/{affiche_url}/g, top.affiche_url || "https://dummyimage.com/600x800/cccccc/000000&text=Affiche");
 
-  return jsonResp({
+  const introText = pickIntroText(settings, top.canonical_key || top.titre || "");
+  const components = top.components || {
+    allocine: computeAllocineComponent(top),
+    user_pref: computeUserPreferenceComponent(ratings, top),
+    castcrew: computeCastCrewComponent(top, settings)
+  };
+  const payload = {
     titre: top.titre,
     formatted_card: card,
+    poster_url: top.affiche_url,
+    notes: {
+      spectateurs: noteSpectateursStr,
+      presse: notePresseStr
+    },
+    score_breakdown: {
+      weights: normalizedWeights,
+      components
+    },
     raw: top
-  }, 200, req);
+  };
+  if (introText) payload.intro = introText;
+
+  return jsonResp(payload, 200, req);
+}
+
+async function cachePool(env, req) {
+  if (!isAuthorized(req, env)) return jsonResp({ error: "Unauthorized" }, 401, req);
+  if (!env?.DB) return jsonResp({ error: "KV DB not bound to worker" }, 503, req);
+  const url = new URL(req.url);
+  const requestedKeys = [];
+  const pushKey = (val) => {
+    if (!val) return;
+    requestedKeys.push(val.toLowerCase());
+  };
+  url.searchParams.getAll("key").forEach(pushKey);
+  const altParams = [
+    ...url.searchParams.getAll("keys"),
+    ...url.searchParams.getAll("keys[]")
+  ];
+  for (const raw of altParams) {
+    if (!raw) continue;
+    const trimmed = raw.trim();
+    if (trimmed.startsWith("[") && trimmed.endsWith("]")) {
+      try {
+        const parsed = JSON.parse(trimmed);
+        if (Array.isArray(parsed)) {
+          parsed.forEach(item => pushKey(String(item)));
+          continue;
+        }
+      } catch (err) {
+        // fall through to treat as single value
+      }
+    }
+    pushKey(trimmed);
+  }
+  const allowed = {
+    ratings: KEYS.RATINGS,
+    parked: KEYS.PARKED,
+    rejects: KEYS.REJECTS
+  };
+
+  const uniqueRequested = Array.from(new Set(requestedKeys));
+  const keysToLoad = ((uniqueRequested.length ? uniqueRequested : Object.keys(allowed)))
+    .filter(k => Object.prototype.hasOwnProperty.call(allowed, k));
+
+  const loaders = keysToLoad.map(k => readJSON(env?.DB, allowed[k]).then(v => Array.isArray(v) ? v : []));
+  const results = await Promise.all(loaders);
+
+  const payload = { synced_at: new Date().toISOString() };
+  keysToLoad.forEach((k, idx) => {
+    payload[k] = results[idx];
+  });
+
+  return jsonResp(payload, 200, req);
 }
 
 
 // --- Handlers for meta, settings, lists, podium, backup, diag, health ---
 
 async function getMeta(env, req) {
+  if (!env?.DB) return jsonResp({ error: "KV DB not bound to worker" }, 503, req);
   const fallback = defaultMeta();
   const obj = (await readJSON(env?.DB, KEYS.META)) ?? fallback;
   return jsonResp(obj, 200, req);
@@ -522,6 +706,7 @@ async function putMeta(env, req) {
 }
 
 async function getMenu(env, req) {
+  if (!env?.DB) return jsonResp({ error: "KV DB not bound to worker" }, 503, req);
   const meta = (await readJSON(env?.DB, KEYS.META)) ?? defaultMeta();
   return jsonResp({ menu: meta.menu, welcome_template: meta.welcome_template }, 200, req);
 }
@@ -542,6 +727,7 @@ async function putMenu(env, req) {
 }
 
 async function getSettings(env, req) {
+  if (!env?.DB) return jsonResp({ error: "KV DB not bound to worker" }, 503, req);
   const fallback = defaultSettings();
   const obj = (await readJSON(env?.DB, KEYS.SETTINGS)) ?? fallback;
   return jsonResp(obj, 200, req);
@@ -562,6 +748,8 @@ async function putSettings(env, req) {
 
 // List endpoints
 async function getList(env, key, req) {
+  if (!isAuthorized(req, env)) return jsonResp({ error: "Unauthorized" }, 401, req);
+  if (!env?.DB) return jsonResp({ error: "KV DB not bound to worker" }, 503, req);
   const url = new URL(req.url);
   const offset = Math.max(0, parseInt(url.searchParams.get("offset") || "0", 10) || 0);
   const limit = Math.min(Math.max(1, parseInt(url.searchParams.get("limit") || `${DEFAULT_LIMIT}`, 10) || DEFAULT_LIMIT), 5000);
@@ -655,6 +843,7 @@ async function putParkedPodium(env, req) {
 // Backup handlers
 async function backupExport(env, req) {
   if (!isAuthorized(req, env)) return jsonResp({ error: "Unauthorized" }, 401, req);
+  if (!env?.DB) return jsonResp({ error: "KV DB not bound to worker" }, 503, req);
   const [meta, settings, ratings, parked, rejects, podium] = await Promise.all([
     readJSON(env?.DB, KEYS.META),
     readJSON(env?.DB, KEYS.SETTINGS),
@@ -691,6 +880,7 @@ async function backupImport(env, req) {
 
 // Diagnostic handler
 async function diag(env, req) {
+  if (!isAuthorized(req, env)) return jsonResp({ error: "Unauthorized" }, 401, req);
   const [
     ratingsRaw,
     parkedRaw,
@@ -718,8 +908,9 @@ async function diag(env, req) {
   const kvBound = !!env?.DB;
   const hasApiToken = !!env?.API_TOKEN;
 
+  const ok = kvBound && hasApiToken;
   return jsonResp({
-    ok: true,
+    ok,
     kvBound,
     hasApiToken,
     authorized,
@@ -802,6 +993,12 @@ export default {
       if (path === "/backup/import") {
         if (method === "POST") return backupImport(env, req);
         return methodNotAllowed(req, ["POST"]);
+      }
+
+      // --- CACHE POOL ---
+      if (path === "/cache/pool") {
+        if (method === "GET") return cachePool(env, req);
+        return methodNotAllowed(req, ["GET"]);
       }
 
       // --- DIAG/HEALTH ---
