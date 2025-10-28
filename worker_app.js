@@ -474,12 +474,18 @@ function computeUserPreferenceComponent(ratings, candidate) {
 
 function computeCastCrewComponent(candidate, settings) {
   const prefs = settings?.behaviors?.l1?.castcrew_preferences || {};
-  const favorites = Array.isArray(prefs.favorites)
-    ? prefs.favorites.map(v => normalizeCanonical(v)).filter(Boolean)
-    : [];
-  const blacklist = Array.isArray(prefs.blacklist)
-    ? prefs.blacklist.map(v => normalizeCanonical(v)).filter(Boolean)
-    : [];
+  let favorites = [];
+  if (Array.isArray(prefs.favorites)) {
+    favorites = prefs.favorites
+      .map(v => normalizeCanonical(v))
+      .filter(Boolean);
+  }
+  let blacklist = [];
+  if (Array.isArray(prefs.blacklist)) {
+    blacklist = prefs.blacklist
+      .map(v => normalizeCanonical(v))
+      .filter(Boolean);
+  }
   const participants = [...(candidate.cast || []), ...(candidate.crew || [])]
     .map(name => normalizeCanonical(name))
     .filter(Boolean);
@@ -500,6 +506,7 @@ function computeCastCrewComponent(candidate, settings) {
 
 async function l1Reco(env, req) {
   if (!isAuthorized(req, env)) return jsonResp({ error: "Unauthorized" }, 401, req);
+  if (!env?.DB) return jsonResp({ error: "KV DB not bound to worker" }, 503, req);
   const url = new URL(req.url);
   const type = url.searchParams.get("type");
   const genre = url.searchParams.get("genre");
@@ -532,18 +539,20 @@ async function l1Reco(env, req) {
   const minRating = isHorror
     ? (settings.thresholds?.horror ?? 2.5)
     : (settings.thresholds?.default ?? 3.0);
-  const candidates = pool
-    .filter(t => t.type === type)
-    .filter(t => isAllGenres || (t.genres || []).some(g => String(g).toLowerCase().includes(lowerGenre)))
-    // Exclude any candidate whose normalized canonical_key appears in the exclusions set
-    .filter(t => !exclusions.has(normalizeCanonical(t.canonical_key)))
-    .filter(t => {
-      const s = parseFloat(t.spectateurs || "0");
-      return s > minRating;
-    })
-    .filter(t => t.affiche_url)
-    .filter(t => t.presse !== null && t.presse !== undefined)
-  : [];
+  let candidates = [];
+  if (Array.isArray(pool)) {
+    candidates = pool
+      .filter(t => t.type === type)
+      .filter(t => isAllGenres || (t.genres || []).some(g => String(g).toLowerCase().includes(lowerGenre)))
+      // Exclude any candidate whose normalized canonical_key appears in the exclusions set
+      .filter(t => !exclusions.has(normalizeCanonical(t.canonical_key)))
+      .filter(t => {
+        const s = parseFloat(t.spectateurs || "0");
+        return s > minRating;
+      })
+      .filter(t => t.affiche_url)
+      .filter(t => t.presse !== null && t.presse !== undefined);
+  }
 
   if (!candidates.length) {
     return jsonResp({ error: "Aucune recommandation valide trouvée." }, 404, req);
@@ -679,30 +688,6 @@ async function handleCachePool(env, req) {
   return jsonResp(payload, 200, req);
 }
 
-async function cachePool(env, req) {
-  if (!isAuthorized(req, env)) return jsonResp({ error: "Unauthorized" }, 401, req);
-  const url = new URL(req.url);
-  const requestedKeys = url.searchParams.getAll("key").map(k => k.toLowerCase());
-  const allowed = {
-    ratings: KEYS.RATINGS,
-    parked: KEYS.PARKED,
-    rejects: KEYS.REJECTS
-  };
-
-  const keysToLoad = (requestedKeys.length ? requestedKeys : Object.keys(allowed))
-    .filter(k => Object.prototype.hasOwnProperty.call(allowed, k));
-
-  const loaders = keysToLoad.map(k => readJSON(env?.DB, allowed[k]).then(v => Array.isArray(v) ? v : []));
-  const results = await Promise.all(loaders);
-
-  const payload = { synced_at: new Date().toISOString() };
-  keysToLoad.forEach((k, idx) => {
-    payload[k] = results[idx];
-  });
-
-  return jsonResp(payload, 200, req);
-}
-
 
 // --- Handlers for meta, settings, lists, podium, backup, diag, health ---
 
@@ -772,6 +757,7 @@ async function putSettings(env, req) {
 // List endpoints
 async function getList(env, key, req) {
   if (!isAuthorized(req, env)) return jsonResp({ error: "Unauthorized" }, 401, req);
+  if (!env?.DB) return jsonResp({ error: "KV DB not bound to worker" }, 503, req);
   const url = new URL(req.url);
   const offset = Math.max(0, parseInt(url.searchParams.get("offset") || "0", 10) || 0);
   const limit = Math.min(Math.max(1, parseInt(url.searchParams.get("limit") || `${DEFAULT_LIMIT}`, 10) || DEFAULT_LIMIT), 5000);
@@ -1019,7 +1005,7 @@ export default {
 
       // --- CACHE POOL ---
       if (path === "/cache/pool") {
-        if (method === "GET") return cachePool(env, req);
+        if (method === "GET") return handleCachePool(env, req);
         return methodNotAllowed(req, ["GET"]);
       }
 

@@ -26,28 +26,26 @@ Avant d’entrer en L1, assure‑toi d’avoir bien chargé les listes ratings, 
 
 1. Demander **type** (film ou série) et **genre** (unique, ou “tous genres confondus”). Si l’un manque, le demander.
 
-2. **Constituer le pool de candidats via `web.search` sur AlloCiné** :
-Lorsque tu construis ou récupères le pool de candidats, élimine tous les titres dont le canonical_key correspond, après normalisation, à ceux présents dans ratings, parked ou rejects. La normalisation doit être cohérente (minuscules, caractères spéciaux remplacés par des tirets, etc.).
+2. **Appeler `GET /l1`** avec `?type=film|serie&genre=...&api_token=...`. Le Worker applique la stratégie L1 complète :
+   • Récupération exclusive sur AlloCiné (notes spectateurs/presse, affiche officielle, synopsis court).
+   • Filtrage strict : seuils spectateurs (> 3,0/5 ou > 2,5/5 pour horreur), élimination des titres présents dans `ratings`, `parked`, `rejects` (comparaison via `canonical_key` normalisé).
+   • Scoring prédictif (Allociné 60 %, préférences utilisateur 20 %, cast & crew 20 %) et sélection du meilleur titre.
+   • Construction d’un rendu complet (`formatted_card`) + métadonnées (poster, notes, `score_breakdown`, `raw`).
 
-   • Rechercher des titres correspondant au type et au genre sur le site AlloCiné (par exemple en utilisant `web.search` avec des requêtes comme `site:allocine.fr film science-fiction note spectateurs`).  
-   • Extraire, pour chaque titre, les informations publiquement disponibles : titre, année, genres, **note spectateurs**, note presse, synopsis court, affiche.  
-   • Ne conserver que les titres dont la note spectateurs est **> 3,0/5** (ou **> 2,5/5** si le genre est “horreur”).
+   Si le Worker renvoie `404`, relance la demande après avoir ajusté les consignes utilisateur (clarifier le genre, proposer une alternative). Répète jusqu’à obtenir une carte valide conforme aux critères.
 
-3. **Exclure** tous les titres présents dans les listes `ratings`, `parked` et `rejects` (en comparant les `canonical_key` des titres avec ceux des listes).
-   • Cette exclusion repose uniquement sur les listes déjà en cache (`backupExport` ou `cache/pool`). Tant qu’aucune écriture n’est flushée, ne redemande pas les listes au Worker.
+3. Afficher la recommandation en utilisant les champs retournés :
+   • Insérer l’introduction `intro` (issue de `ux_prompts.l1_intro_pool`) avant la carte.
+   • Restituer `formatted_card` tel quel pour garantir l’affichage fidèle, puis exploiter `poster_url` si le template en a besoin.
+   • Les actions rapides (`x,x/5`, `met de côté`, `pas intéressé`, `suivant`) restent actives et tamponnées.
 
-4. **Appliquer le scoring prédictif** (comme décrit dans l’algorithme initial) sur les titres restants : préférences personnelles (bonus si ≥ 3,5, malus si < 3, légère récence), cast/crew récurrents, notes Allociné normalisées, bonus/malus des listes (parked = bonus, rejects = malus fort étendu), diversité contrôlée.  
+Avant de conclure, vérifie dans ton cache local que le `canonical_key` du titre renvoyé n’est pas déjà présent. En cas de doublon constaté côté agent (ex. cache non rafraîchi), demande une nouvelle carte L1 ou déclenche une relance manuelle.
 
-5. **Sélectionner le meilleur titre** du pool selon ce score et afficher la carte L1 : affiche, titre VO/VF, année, genres, **P x,x/5**, **S x,x/5**, résumé court (2–3 lignes). Les informations affichées doivent provenir exclusivement de la fiche AlloCiné du titre retenu : récupère impérativement l’affiche officielle ainsi que les notes spectateurs et presse depuis AlloCiné avant d’appliquer le template.
-Juste avant de présenter la recommandation, vérifie une dernière fois que le titre choisi n’est pas dans ratings, parked ou rejects (toujours via son canonical_key normalisé). Si c’est le cas, retire‑le de la liste et sélectionne le candidat suivant. Si aucun candidat ne reste, relance une recherche AlloCiné pour enrichir le pool (ajuste les requêtes si besoin) jusqu’à obtenir une carte valide.
-
-Avant la carte, insère l’introduction définie dans `settings.ux_prompts.l1_intro_pool` : elle n’est pas injectée automatiquement par le moteur.
-
-6. **Actions sans confirmation** :  
-   • `x,x/5` → buffer note (`POST /lists/ratings`)  
-   • `met de côté` → buffer mis de côté (`POST /lists/parked`)  
-   • `pas intéressé` → buffer rejet (`POST /lists/rejects`)  
-   • `suivant` → recommencer la procédure en recherchant un autre titre (même type et même genre).  
+4. **Actions sans confirmation** :
+   • `x,x/5` → buffer note (`POST /lists/ratings`)
+   • `met de côté` → buffer mis de côté (`POST /lists/parked`)
+   • `pas intéressé` → buffer rejet (`POST /lists/rejects`)
+   • `suivant` → recommencer la procédure en sollicitant une nouvelle carte L1 pour le même type/genre.
 
 — L2 : LISTE DES TITRES MIS DE CÔTÉ —
 • Afficher le podium persistant (3 titres) via `GET /lists/parked_podium`. S’il sort des “mis de côté”, l’en retirer.  
