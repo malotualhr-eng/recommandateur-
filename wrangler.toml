@@ -1,4 +1,8 @@
 name = "recommandateur"
+compatibility_date = "2025-10-28"
 main = "./worker_app.js"
 type = "javascript"
-compatibility_date = "2025-10-28"
+[assets]
+directory = "./dist"
+binding = "ASSETS"
+
