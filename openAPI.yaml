@@ -646,20 +646,10 @@ paths:
       description: >
         Retourne les listes `ratings`, `parked` et `rejects` en une seule requête.
         Le paramètre `key` peut être répété pour limiter la réponse à un sous-ensemble.
-        Utiliser `keys` ou `keys[]` revient à passer une chaîne contenant plusieurs
-        clés séparées par des virgules ou des espaces. Les tableaux JSON (ex: `["ratings"]`)
-        ne sont pas pris en charge et renvoient une erreur 400.
       parameters:
         - name: key
           in: query
           description: Liste cible (ratings, parked, rejects). Peut être répété.
-          required: false
-          schema:
-            type: string
-        - name: keys
-          in: query
-          description: Variante permettant de passer plusieurs clés sous forme de chaîne.
-            Séparer les clés par des virgules ou des espaces. Les tableaux JSON ne sont pas acceptés.
           required: false
           schema:
             type: string

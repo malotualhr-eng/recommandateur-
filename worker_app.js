@@ -477,12 +477,9 @@ function computeCastCrewComponent(candidate, settings) {
   const favorites = Array.isArray(prefs.favorites)
     ? prefs.favorites.map(v => normalizeCanonical(v)).filter(Boolean)
     : [];
-  let blacklist = [];
-  if (Array.isArray(prefs.blacklist)) {
-    blacklist = prefs.blacklist
-      .map(v => normalizeCanonical(v))
-      .filter(Boolean);
-  }
+  const blacklist = Array.isArray(prefs.blacklist)
+    ? prefs.blacklist.map(v => normalizeCanonical(v)).filter(Boolean)
+    : [];
   const participants = [...(candidate.cast || []), ...(candidate.crew || [])]
     .map(name => normalizeCanonical(name))
     .filter(Boolean);
@@ -503,7 +500,6 @@ function computeCastCrewComponent(candidate, settings) {
 
 async function l1Reco(env, req) {
   if (!isAuthorized(req, env)) return jsonResp({ error: "Unauthorized" }, 401, req);
-  if (!env?.DB) return jsonResp({ error: "KV DB not bound to worker" }, 503, req);
   const url = new URL(req.url);
   const type = url.searchParams.get("type");
   const genre = url.searchParams.get("genre");
@@ -536,7 +532,7 @@ async function l1Reco(env, req) {
   const minRating = isHorror
     ? (settings.thresholds?.horror ?? 2.5)
     : (settings.thresholds?.default ?? 3.0);
-  const candidates = Array.isArray(pool) ? pool
+  const candidates = pool
     .filter(t => t.type === type)
     .filter(t => isAllGenres || (t.genres || []).some(g => String(g).toLowerCase().includes(lowerGenre)))
     // Exclude any candidate whose normalized canonical_key appears in the exclusions set
@@ -752,7 +748,6 @@ async function putSettings(env, req) {
 // List endpoints
 async function getList(env, key, req) {
   if (!isAuthorized(req, env)) return jsonResp({ error: "Unauthorized" }, 401, req);
-  if (!env?.DB) return jsonResp({ error: "KV DB not bound to worker" }, 503, req);
   const url = new URL(req.url);
   const offset = Math.max(0, parseInt(url.searchParams.get("offset") || "0", 10) || 0);
   const limit = Math.min(Math.max(1, parseInt(url.searchParams.get("limit") || `${DEFAULT_LIMIT}`, 10) || DEFAULT_LIMIT), 5000);
@@ -1000,7 +995,7 @@ export default {
 
       // --- CACHE POOL ---
       if (path === "/cache/pool") {
-        if (method === "GET") return handleCachePool(env, req);
+        if (method === "GET") return cachePool(env, req);
         return methodNotAllowed(req, ["GET"]);
       }
 
