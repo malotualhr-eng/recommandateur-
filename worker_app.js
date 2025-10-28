@@ -500,6 +500,7 @@ function computeCastCrewComponent(candidate, settings) {
 
 async function l1Reco(env, req) {
   if (!isAuthorized(req, env)) return jsonResp({ error: "Unauthorized" }, 401, req);
+  if (!env?.DB) return jsonResp({ error: "KV DB not bound to worker" }, 503, req);
   const url = new URL(req.url);
   const type = url.searchParams.get("type");
   const genre = url.searchParams.get("genre");
@@ -532,7 +533,7 @@ async function l1Reco(env, req) {
   const minRating = isHorror
     ? (settings.thresholds?.horror ?? 2.5)
     : (settings.thresholds?.default ?? 3.0);
-  const candidates = pool
+  const candidates = Array.isArray(pool) ? pool
     .filter(t => t.type === type)
     .filter(t => isAllGenres || (t.genres || []).some(g => String(g).toLowerCase().includes(lowerGenre)))
     // Exclude any candidate whose normalized canonical_key appears in the exclusions set
@@ -543,7 +544,7 @@ async function l1Reco(env, req) {
     })
     .filter(t => t.affiche_url)
     .filter(t => t.presse !== null && t.presse !== undefined)
-  : [];
+   [];
 
   if (!candidates.length) {
     return jsonResp({ error: "Aucune recommandation valide trouvée." }, 404, req);
@@ -628,35 +629,35 @@ async function l1Reco(env, req) {
   return jsonResp(payload, 200, req);
 }
 
-async function handleCachePool(env, req) {
+async function cachePool(env, req) {
   if (!isAuthorized(req, env)) return jsonResp({ error: "Unauthorized" }, 401, req);
   if (!env?.DB) return jsonResp({ error: "KV DB not bound to worker" }, 503, req);
   const url = new URL(req.url);
   const requestedKeys = [];
   const pushKey = (val) => {
     if (!val) return;
-    const normalized = String(val).trim().toLowerCase();
-    if (normalized) requestedKeys.push(normalized);
+    requestedKeys.push(val.toLowerCase());
   };
   url.searchParams.getAll("key").forEach(pushKey);
   const altParams = [
     ...url.searchParams.getAll("keys"),
     ...url.searchParams.getAll("keys[]")
   ];
-  let invalidPayload = false;
   for (const raw of altParams) {
     if (!raw) continue;
     const trimmed = raw.trim();
     if (trimmed.startsWith("[") && trimmed.endsWith("]")) {
-      invalidPayload = true;
-      break;
+      try {
+        const parsed = JSON.parse(trimmed);
+        if (Array.isArray(parsed)) {
+          parsed.forEach(item => pushKey(String(item)));
+          continue;
+        }
+      } catch (err) {
+        // fall through to treat as single value
+      }
     }
-    trimmed.split(/[\s,;]+/).forEach(pushKey);
-  }
-  if (invalidPayload) {
-    return jsonResp({
-      error: "Invalid keys parameter. Use repeated ?key=... entries instead of JSON arrays."
-    }, 400, req);
+    pushKey(trimmed);
   }
   const allowed = {
     ratings: KEYS.RATINGS,
@@ -772,6 +773,7 @@ async function putSettings(env, req) {
 // List endpoints
 async function getList(env, key, req) {
   if (!isAuthorized(req, env)) return jsonResp({ error: "Unauthorized" }, 401, req);
+  if (!env?.DB) return jsonResp({ error: "KV DB not bound to worker" }, 503, req);
   const url = new URL(req.url);
   const offset = Math.max(0, parseInt(url.searchParams.get("offset") || "0", 10) || 0);
   const limit = Math.min(Math.max(1, parseInt(url.searchParams.get("limit") || `${DEFAULT_LIMIT}`, 10) || DEFAULT_LIMIT), 5000);

@@ -646,6 +646,8 @@ paths:
       description: >
         Retourne les listes `ratings`, `parked` et `rejects` en une seule requête.
         Le paramètre `key` peut être répété pour limiter la réponse à un sous-ensemble.
+        Pour compatibilité, `keys` et `keys[]` acceptent également une liste de valeurs
+        (y compris un tableau JSON encodé) et sont normalisés par le Worker.
       parameters:
         - name: key
           in: query
@@ -653,6 +655,15 @@ paths:
           required: false
           schema:
             type: string
+        - name: keys
+          in: query
+          description: Variante permettant de passer plusieurs clés (string ou tableau JSON sérialisé).
+          required: false
+          schema:
+            oneOf:
+              - type: string
+              - type: array
+                items: { type: string }
       responses:
         "200":
           description: OK
