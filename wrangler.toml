@@ -1,5 +1,4 @@
 name = "recommandateur"
 main = "./worker_app.js"
 type = "javascript"
-directory = "./dist"
 compatibility_date = "2025-10-28"
