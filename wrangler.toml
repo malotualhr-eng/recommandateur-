@@ -1,3 +1,6 @@
 name = "recommandateur"
 main = "worker_app.js"
 compatibility_date = "2025-10-28"
+kv_namespaces = [
+  { binding = "DB", id = "1f6fbf85b1634175a45d05b575bed8a7" }
+]

@@ -828,7 +828,9 @@ async function addToList(env, req, key) {
 
 // L2 podium handlers
 async function getParkedPodium(env, req) {
-  const podium = (await readJSON(env?.DB, KEYS.PARKED_PODIUM)) ?? [];
+  if (!isAuthorized(req, env)) return jsonResp({ error: "Unauthorized" }, 401, req);
+  if (!env?.DB) return jsonResp({ error: "KV DB not bound to worker" }, 503, req);
+  const podium = (await readJSON(env.DB, KEYS.PARKED_PODIUM)) ?? [];
   return jsonResp({ keys: podium }, 200, req);
 }
 
