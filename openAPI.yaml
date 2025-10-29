@@ -581,6 +581,10 @@ paths:
                   keys:
                     type: array
                     items: { type: string }
+        "401":
+          description: Jeton API manquant ou invalide
+        "503":
+          description: KV DB non liée au Worker
     put:
       tags: [Lists]
       operationId: putParkedPodium
@@ -608,6 +612,10 @@ paths:
                   keys:
                     type: array
                     items: { type: string }
+        "401":
+          description: Jeton API manquant ou invalide
+        "503":
+          description: KV DB non liée au Worker
 
   /backup/export:
     get:
